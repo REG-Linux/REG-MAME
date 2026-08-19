@@ -108,7 +108,7 @@ jobs:
           lrmameversion="$(sed -nE 's/.*lrmame([0-9]{4}).*/\1/p' package/emulators/libretro/libretro-mame/libretro-mame.mk)"
           echo "mameversion=${mameversion}"
           echo "lrmameversion=${lrmameversion}"
-          { [ -z "$mameversion" ] || [ -z "$lrmameversion" ] || [ "$mameversion" != "$lrmameversion" ] } && { echo "Version not detected or mismatched."; exit 1; }
+          { [ -z "$mameversion" ] || [ -z "$lrmameversion" ] || [ "$mameversion" != "$lrmameversion" ]; } && { echo "Version not detected or mismatched."; exit 1; }
           echo "mameversion=${mameversion}" >> "$GITHUB_OUTPUT"
           
           # Check if already released and avoid compiling again
