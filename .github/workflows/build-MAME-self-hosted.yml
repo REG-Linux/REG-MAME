@@ -20,9 +20,6 @@ env:
 jobs:
   build:
     name: Build REG-MAME
-    outputs:
-      mameversion: ${{ steps.compile_step.outputs.mameversion }}
-      dorelease: ${{ steps.compile_step.outputs.dorelease }}
     runs-on: self-hosted
     timeout-minutes: 4320
     strategy:
@@ -166,19 +163,46 @@ jobs:
     name: Create release
     runs-on: self-hosted
     needs: build
-    if: ${{ needs.build.outputs.dorelease == 'true' && ! cancelled() }}
+    if: ${{ !cancelled() }}
     steps:
+      - name: Clean stale artifacts from previous runs
+        run: rm -rf artifacts && mkdir -p artifacts
+
       - name: Download artifacts
         uses: actions/download-artifact@v8.0.1
         with:
-          pattern: reglinux-mame-${{ needs.build.outputs.mameversion }}-*
-          path: ./
+          pattern: reglinux-mame-*
+          path: artifacts
           merge-multiple: true
+
+      # A matrix job cannot aggregate a "did anything build?" flag: every leg
+      # writes the same job output and the last one to finish wins, so a leg
+      # that skipped the build would suppress the release. The artifacts are
+      # the aggregate - only legs that built something upload one - and the
+      # version is already in their file names.
+      - name: Decide whether there is anything to release
+        id: rel
+        run: |
+          shopt -s nullglob
+          files=(artifacts/reglinux-mame-*.tar.xz)
+          if [ ${#files[@]} -eq 0 ]; then
+            echo "No new tarballs were built; nothing to release."
+            exit 0
+          fi
+          mameversion="$(basename "${files[0]}" | sed -nE 's/^reglinux-mame-([0-9]{4})-.*\.tar\.xz$/\1/p')"
+          if [ -z "$mameversion" ]; then
+            echo "Could not parse MAME version from ${files[0]}"
+            exit 1
+          fi
+          echo "Releasing ${#files[@]} tarball(s) as ${mameversion}"
+          echo "mameversion=${mameversion}" >> "$GITHUB_OUTPUT"
+
       - name: Create release
+        if: ${{ steps.rel.outputs.mameversion != '' }}
         uses: softprops/action-gh-release@v3.0.2
         with:
-          files: reglinux-mame-${{ needs.build.outputs.mameversion }}-*
-          tag_name: ${{ needs.build.outputs.mameversion }}
+          files: artifacts/reglinux-mame-${{ steps.rel.outputs.mameversion }}-*
+          tag_name: ${{ steps.rel.outputs.mameversion }}
           prerelease: false
           generate_release_notes: true
-          name: MAME binaries ${{ needs.build.outputs.mameversion }}
+          name: MAME binaries ${{ steps.rel.outputs.mameversion }}
