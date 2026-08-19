@@ -24,6 +24,7 @@ jobs:
       mameversion: ${{ steps.compile_step.outputs.mameversion }}
       dorelease: ${{ steps.compile_step.outputs.dorelease }}
     runs-on: self-hosted
+    timeout-minutes: 4320
     strategy:
       matrix:
         # One build per CPU, not per board: every 64-bit board picks its
