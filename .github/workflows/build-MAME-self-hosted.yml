@@ -1,0 +1,183 @@
+name: Build REG-MAME self-hosted
+
+on:
+  workflow_dispatch:
+
+concurrency:
+    group: ${{ github.repository }}-${{ github.workflow }}
+    cancel-in-progress: true
+
+permissions:
+  contents: write
+  actions: write
+
+env:
+  LANG: en_US.UTF-8
+  LANGUAGE: en_US:en
+  LC_ALL: en_US.UTF-8
+  FORCE_UNSAFE_CONFIGURE: 1
+
+jobs:
+  build:
+    name: Build REG-MAME
+    outputs:
+      mameversion: ${{ steps.compile_step.outputs.mameversion }}
+      dorelease: ${{ steps.compile_step.outputs.dorelease }}
+    runs-on: self-hosted
+    strategy:
+      matrix:
+        # One build per CPU, not per board: every 64-bit board picks its
+        # prebuilt by CPU (see REGLINUX_MAME_ARCH in reglinux-mame.mk), so the
+        # target below is just a representative board for that CPU. 32-bit
+        # boards are absent on purpose - BR2_ARCH_IS_64 gates the prebuilt, so
+        # they take lr-mame2010 instead and never look for a tarball.
+        cpu: [cortex_a35, cortex_a53, cortex_a55, cortex_a57, cortex_a72, cortex_a72_a53, cortex_a73_a53, cortex_a75_a55, cortex_a76, cortex_a76_a55, cortex_x3, riscv, riscv_rvv, x86_64, x86_64_v3, saphira]
+        include:
+          # also covers s9gen4
+          - target: rk3326
+            cpu: cortex_a35
+          # also covers a133, bcm2837, h700, rk3328, s905, s905gen2, sun50i
+          - target: h616
+            cpu: cortex_a53
+          # also covers odroidc5, s905gen3, t527
+          - target: rk3568
+            cpu: cortex_a55
+          - target: l4t
+            cpu: cortex_a57
+          - target: bcm2711
+            cpu: cortex_a72
+          # also covers rk3576, rk3576-bsp, rk3576-mainline
+          - target: rk3399
+            cpu: cortex_a72_a53
+          # also covers a3gen2, sm6115
+          - target: s922x
+            cpu: cortex_a73_a53
+          - target: sdm845
+            cpu: cortex_a75_a55
+          - target: bcm2712
+            cpu: cortex_a76
+          # also covers mt8395, qcs6490, rk3588
+          - target: sm8250
+            cpu: cortex_a76_a55
+          - target: sm8550
+            cpu: cortex_x3
+          # also covers th1520
+          - target: jh7110
+            cpu: riscv
+          # k1/k3 build with RVV (-march=rv64imafdv -mno-relax), so they cannot
+          # share the jh7110 tarball
+          - target: k1
+            cpu: riscv_rvv
+          - target: x86_64
+            cpu: x86_64
+          - target: x86_64_v3
+            cpu: x86_64_v3
+          - target: asahi
+            cpu: saphira
+      fail-fast: false
+    steps:
+      - name: Login to GHCR
+        uses: docker/login-action@v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      - name: Clone repository
+        id: clone_step
+        uses: actions/checkout@v7.0.1
+        with:
+          repository: REG-Linux/REG-WIP
+          token: ${{ secrets.REG_TOKEN }}
+          submodules: true
+
+      - name: Compile ${{ matrix.target }}
+        id: compile_step
+        env:
+          GH_TOKEN: ${{ secrets.REG_TOKEN }}
+        run: |
+          git config user.name "${{ github.repository_owner }}"
+          git config user.email "${{ github.repository_owner }}@users.noreply.github.com"
+          git config --local user.password ${{ github.token }}
+          
+          # Merge buildroot patches
+          CUSTOM_DIR=${{ github.workspace }}/custom BUILDROOT_DIR=${{ github.workspace }}/buildroot ${{ github.workspace }}/scripts/buildroot/mergeToBR.sh
+          
+          # Version
+          mameversion="$(sed -nE 's/.*gm([0-9]{4}).*/\1/p' package/emulators/mame/mame.mk)"
+          lrmameversion="$(sed -nE 's/.*lrmame([0-9]{4}).*/\1/p' package/emulators/libretro/libretro-mame/libretro-mame.mk)"
+          echo "mameversion=${mameversion}"
+          echo "lrmameversion=${lrmameversion}"
+          { [ -z "$mameversion" ] || [ -z "$lrmameversion" ] || [ "$mameversion" != "$lrmameversion" ] } && { echo "Version not detected or mismatched."; exit 1; }
+          echo "mameversion=${mameversion}" >> "$GITHUB_OUTPUT"
+          
+          # Check if already released and avoid compiling again
+          if [ "$(curl -o /dev/null -s -Iw '%{http_code}' -L "https://github.com/${{ github.repository }}/releases/download/${mameversion}/reglinux-mame-${mameversion}-${{ matrix.cpu }}.tar.xz")" -eq 200 ]; then
+            echo "Already released, skipping build."
+          else
+            echo "Not yet released, proceeding with build"
+            df -BG --output=avail ./
+            
+            # fix for error "failed to set up container networking"
+            sed -i 's| --rm | --rm --network host |' Makefile
+            
+            # Enable the flags to build MAME from source
+            sed -i 's/#BR2_PACKAGE_MAME_BUILD_FROM_SOURCE=y/BR2_PACKAGE_MAME_BUILD_FROM_SOURCE=y/'' configs/reglinux-board.common
+            
+            # Disable CCACHE
+            sed -i 's/BR2_CCACHE=y/BR2_CCACHE=n/' configs/reglinux-board.common
+            
+            rm -rf output/
+            make PKG=mame ${{ matrix.target }}-pkg DEBUG_BUILD=n CCACHE_DISABLE=1
+            make PKG=libretro-mame ${{ matrix.target }}-pkg DEBUG_BUILD=n CCACHE_DISABLE=1
+            
+            # Create package
+            cd "${{ github.workspace }}/output/${{ matrix.target }}" || exit 1
+            if [ -d "per-package" ]; then
+              cat build/mame-*/.files-list.txt | cut -d ',' -f 2 | sed -e 's+\.\/+per-package\/mame\/target\/+g' >mame-target-files.txt
+              cat build/libretro-mame-*/.files-list.txt | cut -d ',' -f 2 | sed -e 's+\.\/+per-package\/libretro-mame\/target\/+g' >>mame-target-files.txt
+              XZ_OPT=-9 tar -cJf "${{ github.workspace }}/reglinux-mame-${mameversion}-${{ matrix.cpu }}.tar.xz" --transform='s|.*target/|target/|' --verbatim-files-from -T mame-target-files.txt || :
+            else
+              cat build/mame-*/.files-list.txt | cut -d ',' -f 2 | sed -e 's+\.\/+target\/+g' >mame-target-files.txt
+              cat build/libretro-mame-*/.files-list.txt | cut -d ',' -f 2 | sed -e 's+\.\/+target\/+g' >>mame-target-files.txt
+              XZ_OPT=-9 tar -cJf "${{ github.workspace }}/reglinux-mame-${mameversion}-${{ matrix.cpu }}.tar.xz" --verbatim-files-from -T mame-target-files.txt || :
+            fi
+            echo "dorelease=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Upload Artifacts
+        if: ${{ steps.compile_step.outputs.dorelease == 'true' && ! cancelled() }}
+        id: upload_artifacts
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: reglinux-mame-${{ steps.compile_step.outputs.mameversion }}-${{ matrix.cpu }}
+          compression-level: 0
+          path: reglinux-mame-${{ steps.compile_step.outputs.mameversion }}-*
+
+      - name: Upload full-build.log on failure
+        if: failure()
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: full-build-log-${{ matrix.target }}
+          path: ${{ github.workspace }}/output/${{ matrix.target }}/build/full-build.log
+
+  create_release:
+    name: Create release
+    runs-on: self-hosted
+    needs: build
+    if: ${{ needs.build.outputs.dorelease == 'true' && ! cancelled() }}
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v8.0.1
+        with:
+          pattern: reglinux-mame-${{ needs.build.outputs.mameversion }}-*
+          path: ./
+          merge-multiple: true
+      - name: Create release
+        uses: softprops/action-gh-release@v3.0.2
+        with:
+          files: reglinux-mame-${{ needs.build.outputs.mameversion }}-*
+          tag_name: ${{ needs.build.outputs.mameversion }}
+          prerelease: false
+          generate_release_notes: true
+          name: MAME binaries ${{ needs.build.outputs.mameversion }}
