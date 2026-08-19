@@ -122,7 +122,7 @@ jobs:
             sed -i 's| --rm | --rm --network host |' Makefile
             
             # Enable the flags to build MAME from source
-            sed -i 's/#BR2_PACKAGE_MAME_BUILD_FROM_SOURCE=y/BR2_PACKAGE_MAME_BUILD_FROM_SOURCE=y/'' configs/reglinux-board.common
+            sed -i 's/#BR2_PACKAGE_MAME_BUILD_FROM_SOURCE=y/BR2_PACKAGE_MAME_BUILD_FROM_SOURCE=y/' configs/reglinux-board.common
             
             # Disable CCACHE
             sed -i 's/BR2_CCACHE=y/BR2_CCACHE=n/' configs/reglinux-board.common
